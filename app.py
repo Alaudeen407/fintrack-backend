@@ -1489,8 +1489,14 @@ def serve_frontend(path):
     })
 
 
-if __name__ == '__main__':
+# Initialize database on startup (for both Gunicorn and direct execution)
+try:
     init_db()
-    print("Database initialized successfully with FinSet SQLite schema.")
-    print("Flask Expense Tracker Backend running on http://127.0.0.1:5000")
-    app.run(host='127.0.0.1', port=5000, debug=True)
+except Exception as _e:
+    print(f"[!] Database startup notice: {_e}")
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 5000))
+    debug_mode = os.environ.get("FLASK_DEBUG", "False").lower() in ("true", "1")
+    print(f"Flask Expense Tracker Backend running on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=debug_mode)

@@ -1213,7 +1213,7 @@ def export_monthly_excel():
     ws1.title = "Transactions Ledger"
     ws1.views.sheetView[0].showGridLines = True
 
-    tx_headers = ["ID", "Transaction Date", "Time", "Type", "Category", "Description", "Amount ($)", "Payment Method", "Notes"]
+    tx_headers = ["ID", "Transaction Date", "Time", "Type", "Category", "Description", "Amount (₹)", "Payment Method", "Notes"]
     for col_idx, h in enumerate(tx_headers, start=1):
         cell = ws1.cell(row=1, column=col_idx, value=h)
         cell.fill = header_fill
@@ -1254,7 +1254,7 @@ def export_monthly_excel():
         ws1.cell(row=row_idx, column=6, value=tx['description'])
         
         amt_cell = ws1.cell(row=row_idx, column=7, value=tx['amount'])
-        amt_cell.number_format = '"$"#,##0.00'
+        amt_cell.number_format = '"₹"#,##0.00'
         amt_cell.font = green_font if tx['type'] == 'credit' else red_font
 
         ws1.cell(row=row_idx, column=8, value=tx['payment_method'])
@@ -1289,7 +1289,7 @@ def export_monthly_excel():
 
         cell_val = ws2[c2]
         cell_val.value = val
-        cell_val.number_format = '"$"#,##0.00'
+        cell_val.number_format = '"₹"#,##0.00'
         cell_val.font = font_color
         cell_val.fill = kpi_fill
         cell_val.alignment = Alignment(horizontal="center")
@@ -1298,7 +1298,7 @@ def export_monthly_excel():
     ws2['A6'] = "CATEGORY BREAKDOWN"
     ws2['A6'].font = Font(name="Calibri", size=12, bold=True, color="14171A")
 
-    cat_headers = ["Category", "Transaction Type", "Total Amount ($)", "Entries Count"]
+    cat_headers = ["Category", "Transaction Type", "Total Amount (₹)", "Entries Count"]
     for col_idx, h in enumerate(cat_headers, start=1):
         cell = ws2.cell(row=7, column=col_idx, value=h)
         cell.fill = header_fill
@@ -1310,7 +1310,7 @@ def export_monthly_excel():
         ws2.cell(row=row_num, column=1, value=c['category']).border = thin_border
         ws2.cell(row=row_num, column=2, value=c['type'].upper()).border = thin_border
         amt_cell = ws2.cell(row=row_num, column=3, value=c['total'])
-        amt_cell.number_format = '"$"#,##0.00'
+        amt_cell.number_format = '"₹"#,##0.00'
         amt_cell.border = thin_border
         ws2.cell(row=row_num, column=4, value=c['count']).border = thin_border
         row_num += 1
@@ -1319,7 +1319,7 @@ def export_monthly_excel():
     ws3 = wb.create_sheet(title="Monthly Bills")
     ws3.views.sheetView[0].showGridLines = True
 
-    bill_headers = ["ID", "Bill Name", "Due Date", "Category", "Amount ($)", "Status", "Auto-Pay"]
+    bill_headers = ["ID", "Bill Name", "Due Date", "Category", "Amount (₹)", "Status", "Auto-Pay"]
     for col_idx, h in enumerate(bill_headers, start=1):
         cell = ws3.cell(row=1, column=col_idx, value=h)
         cell.fill = header_fill
@@ -1333,7 +1333,7 @@ def export_monthly_excel():
         ws3.cell(row=row_idx, column=4, value=b['category'])
         
         amt_cell = ws3.cell(row=row_idx, column=5, value=b['amount'])
-        amt_cell.number_format = '"$"#,##0.00'
+        amt_cell.number_format = '"₹"#,##0.00'
 
         st_cell = ws3.cell(row=row_idx, column=6, value=b['status'].upper())
         st_cell.font = green_font if b['status'] == 'paid' else red_font
@@ -1398,7 +1398,7 @@ def export_csv():
 
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(['ID', 'Transaction Date', 'Time', 'Type (Credit/Debit)', 'Category', 'Description', 'Amount', 'Payment Method', 'Notes'])
+    writer.writerow(['ID', 'Transaction Date', 'Time', 'Type (Credit/Debit)', 'Category', 'Description', 'Amount (₹)', 'Payment Method', 'Notes'])
 
     for r in rows:
         created_at_val = r['created_at'] or ''

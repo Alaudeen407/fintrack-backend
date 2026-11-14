@@ -129,28 +129,19 @@ def init_db(force_reseed=False):
             INSERT INTO users (name, email, password_hash, avatar)
             VALUES (?, ?, ?, ?)
         ''', (
-            'Adaline Lively',
-            'adalinect@gmail.com',
+            'Alaudeen',
+            'alaudeen@gmail.com',
             generate_password_hash('password123'),
-            'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=120&q=80'
+            'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=120&q=80'
         ))
 
-    # Seed transactions if empty
-    cursor.execute('SELECT COUNT(*) FROM transactions')
-    if cursor.fetchone()[0] == 0:
-        seed_sample_data(cursor)
-    else:
-        # Ensure realistic timestamps matching transaction date if out of sync
-        cursor.execute('''
-            UPDATE transactions 
-            SET created_at = date || ' ' || printf('%02d:%02d:%02d', 9 + (id % 10), (id * 7) % 60, (id * 13) % 60)
-            WHERE SUBSTR(created_at, 1, 10) != date
-        ''')
-
-    # Seed bills if empty
-    cursor.execute('SELECT COUNT(*) FROM bills')
-    if cursor.fetchone()[0] == 0:
-        seed_sample_bills(cursor)
+    # Do not auto-seed demo transactions or bills; start clean!
+    # Ensure realistic timestamps matching transaction date if out of sync
+    cursor.execute('''
+        UPDATE transactions 
+        SET created_at = date || ' ' || printf('%02d:%02d:%02d', 9 + (id % 10), (id * 7) % 60, (id * 13) % 60)
+        WHERE SUBSTR(created_at, 1, 10) != date
+    ''')
 
     conn.commit()
     conn.close()
@@ -764,6 +755,103 @@ def get_summary():
     pm_rows = cursor.fetchall()
     payment_methods = [{'method': r['payment_method'], 'count': r['count'], 'total': float(r['total'])} for r in pm_rows]
 
+    # 1. Daily Balance Progression for Current Month (Total balance overview chart)
+    cur_month_start = f"{cur_month_prefix}-01"
+    cursor.execute('''
+        SELECT 
+            COALESCE(SUM(CASE WHEN type = 'credit' THEN amount ELSE -amount END), 0) AS prior_balance
+        FROM transactions
+        WHERE date < ?
+    ''', (cur_month_start,))
+    prior_balance = float(cursor.fetchone()['prior_balance'])
+
+    cursor.execute('''
+        SELECT 
+            date,
+            SUM(CASE WHEN type = 'credit' THEN amount ELSE -amount END) AS net_change
+        FROM transactions
+        WHERE date LIKE ?
+        GROUP BY date
+        ORDER BY date ASC
+    ''', (f"{cur_month_prefix}%",))
+    daily_changes = {r['date']: float(r['net_change']) for r in cursor.fetchall()}
+
+    running_bal = prior_balance
+    daily_balance_trend = []
+    num_days = max(today.day, 10)
+    cur_month_abbr = today.strftime('%b')
+    for d in range(1, num_days + 1):
+        d_str = f"{cur_month_prefix}-{d:02d}"
+        if d_str in daily_changes:
+            running_bal += daily_changes[d_str]
+        daily_balance_trend.append({
+            'date': d_str,
+            'day': d,
+            'label': f"{d} {cur_month_abbr}",
+            'balance': round(running_bal, 2)
+        })
+
+    # 2. Previous Month Trend for Comparison Curve
+    prev_month_num = 12 if today.month == 1 else today.month - 1
+    prev_year_num = today.year - 1 if today.month == 1 else today.year
+    prev_month_prefix = f"{prev_year_num:04d}-{prev_month_num:02d}"
+    prev_month_start = f"{prev_month_prefix}-01"
+
+    cursor.execute('''
+        SELECT 
+            COALESCE(SUM(CASE WHEN type = 'credit' THEN amount ELSE -amount END), 0) AS prev_prior_bal
+        FROM transactions
+        WHERE date < ?
+    ''', (prev_month_start,))
+    prev_running = float(cursor.fetchone()['prev_prior_bal'])
+
+    cursor.execute('''
+        SELECT 
+            date,
+            SUM(CASE WHEN type = 'credit' THEN amount ELSE -amount END) AS net_change
+        FROM transactions
+        WHERE date LIKE ?
+        GROUP BY date
+        ORDER BY date ASC
+    ''', (f"{prev_month_prefix}%",))
+    prev_daily_changes = {r['date']: float(r['net_change']) for r in cursor.fetchall()}
+
+    prev_balance_trend = []
+    prev_month_abbr = datetime(prev_year_num, prev_month_num, 1).strftime('%b')
+    for d in range(1, num_days + 1):
+        d_str = f"{prev_month_prefix}-{d:02d}"
+        if d_str in prev_daily_changes:
+            prev_running += prev_daily_changes[d_str]
+        prev_balance_trend.append({
+            'date': d_str,
+            'day': d,
+            'label': f"{d} {prev_month_abbr}",
+            'balance': round(prev_running, 2)
+        })
+
+    # 3. Monthly Budget & Expense Comparison (Comparing Chart)
+    month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    trend_by_month = {m['month']: m for m in monthly_trend}
+    budget_comparison = []
+    max_m = max(today.month, 7)
+    for m_idx in range(1, max_m + 1):
+        m_key = f"{today.year:04d}-{m_idx:02d}"
+        m_data = trend_by_month.get(m_key, {'credit': 0.0, 'debit': 0.0, 'net': 0.0})
+        m_exp = m_data['debit']
+        m_bud = m_data['credit']
+        is_exceeded = (m_exp > m_bud) if m_bud > 0 else (m_exp > 0 and m_bud == 0)
+        excess_pct = round(((m_exp - m_bud) / m_bud * 100), 1) if m_bud > 0 and is_exceeded else (100 if is_exceeded else 0)
+        excess_val = round(max(0, m_exp - m_bud), 2)
+        budget_comparison.append({
+            'month': month_names[m_idx - 1],
+            'month_key': m_key,
+            'budget': m_bud,
+            'expense': m_exp,
+            'exceeded': is_exceeded,
+            'excessPct': excess_pct,
+            'excessVal': excess_val
+        })
+
     conn.close()
 
     return jsonify({
@@ -779,7 +867,10 @@ def get_summary():
         'category_breakdown': category_breakdown,
         'income_breakdown': income_breakdown,
         'monthly_trend': monthly_trend,
-        'payment_methods': payment_methods
+        'payment_methods': payment_methods,
+        'daily_balance_trend': daily_balance_trend,
+        'prev_balance_trend': prev_balance_trend,
+        'budget_comparison': budget_comparison
     })
 
 
@@ -1464,8 +1555,23 @@ def mongodb_status():
 
 @app.route('/api/reset', methods=['POST'])
 def reset_seed():
-    init_db(force_reseed=True)
-    return jsonify({"status": "reseeded", "message": "Database reset to FinSet demo data in MongoDB Atlas & SQLite"})
+    """Clear all transactions and bills, removing all demo data cleanly."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM transactions')
+    cursor.execute('DELETE FROM bills')
+    conn.commit()
+    conn.close()
+
+    mdb = get_mongo_db()
+    if mdb is not None:
+        try:
+            mdb.transactions.delete_many({})
+            mdb.bills.delete_many({})
+        except Exception as e:
+            print(f"[!] MongoDB Atlas reset notice: {e}")
+
+    return jsonify({"status": "cleared", "message": "All demo records removed. Database is now clean and empty in MongoDB Atlas & SQLite!"})
 
 
 # Serve built React frontend if available

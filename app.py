@@ -64,14 +64,74 @@ def get_db_connection():
     return conn
 
 
+def get_request_user_id(required=True):
+    """
+    Extract current user_id from headers, auth token, query parameters, or request body.
+    Supports:
+    - Header: X-User-Id: <int>
+    - Header: Authorization: Bearer session_<user_id>_... OR Bearer <user_id>
+    - Query Param: ?user_id=<int>
+    - JSON Body: data.get('user_id')
+    """
+    user_id = None
+
+    # 1. Check X-User-Id header
+    x_uid = request.headers.get('X-User-Id')
+    if x_uid and str(x_uid).strip().isdigit():
+        user_id = int(str(x_uid).strip())
+
+    # 2. Check Authorization header
+    if user_id is None:
+        auth_header = request.headers.get('Authorization', '')
+        if auth_header.startswith('Bearer '):
+            token = auth_header[7:].strip()
+            if token.startswith('session_'):
+                parts = token.split('_')
+                if len(parts) >= 2 and parts[1].isdigit():
+                    user_id = int(parts[1])
+            elif token.isdigit():
+                user_id = int(token)
+
+    # 3. Check query parameter
+    if user_id is None:
+        q_uid = request.args.get('user_id')
+        if q_uid and str(q_uid).strip().isdigit():
+            user_id = int(str(q_uid).strip())
+
+    # 4. Check JSON body
+    if user_id is None and request.is_json:
+        try:
+            data = request.get_json(silent=True) or {}
+            b_uid = data.get('user_id')
+            if b_uid and str(b_uid).strip().isdigit():
+                user_id = int(str(b_uid).strip())
+        except Exception:
+            pass
+
+    # 5. Fallback if required: first user or 1
+    if user_id is None and required:
+        try:
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute('SELECT id FROM users ORDER BY id ASC LIMIT 1')
+            first_u = c.fetchone()
+            conn.close()
+            user_id = first_u['id'] if first_u else 1
+        except Exception:
+            user_id = 1
+
+    return user_id
+
+
 def init_db(force_reseed=False):
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # 1. Transactions table
+    # 1. Transactions table with user_id
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL DEFAULT 1,
             type TEXT NOT NULL CHECK(type IN ('credit', 'debit')),
             amount REAL NOT NULL CHECK(amount > 0),
             category TEXT NOT NULL,
@@ -79,12 +139,21 @@ def init_db(force_reseed=False):
             date TEXT NOT NULL,
             payment_method TEXT NOT NULL DEFAULT 'Cash',
             notes TEXT DEFAULT '',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id)
         )
     ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_trans_user ON transactions(user_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_trans_date ON transactions(date)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_trans_type ON transactions(type)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_trans_category ON transactions(category)')
+
+    # Ensure user_id column exists on existing transactions table (migration)
+    cursor.execute("PRAGMA table_info(transactions)")
+    cols = [col[1] for col in cursor.fetchall()]
+    if 'user_id' not in cols:
+        cursor.execute("ALTER TABLE transactions ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_trans_user ON transactions(user_id)')
 
     # 2. Users table
     cursor.execute('''
@@ -98,10 +167,11 @@ def init_db(force_reseed=False):
         )
     ''')
 
-    # 3. Monthly Bills table
+    # 3. Monthly Bills table with user_id
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS bills (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL DEFAULT 1,
             name TEXT NOT NULL,
             amount REAL NOT NULL CHECK(amount > 0),
             due_day INTEGER NOT NULL,
@@ -111,11 +181,20 @@ def init_db(force_reseed=False):
             auto_pay INTEGER NOT NULL DEFAULT 0,
             paid_date TEXT,
             notes TEXT DEFAULT '',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id)
         )
     ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_bills_user ON bills(user_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_bills_due ON bills(due_date)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_bills_status ON bills(status)')
+
+    # Ensure user_id column exists on existing bills table (migration)
+    cursor.execute("PRAGMA table_info(bills)")
+    b_cols = [col[1] for col in cursor.fetchall()]
+    if 'user_id' not in b_cols:
+        cursor.execute("ALTER TABLE bills ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_bills_user ON bills(user_id)')
 
     if force_reseed:
         cursor.execute('DELETE FROM transactions')
@@ -135,7 +214,6 @@ def init_db(force_reseed=False):
             'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=120&q=80'
         ))
 
-    # Do not auto-seed demo transactions or bills; start clean!
     # Ensure realistic timestamps matching transaction date if out of sync
     cursor.execute('''
         UPDATE transactions 
@@ -217,8 +295,8 @@ def seed_sample_data(cursor):
     ]
 
     cursor.executemany('''
-        INSERT INTO transactions (type, amount, category, description, date, payment_method, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO transactions (user_id, type, amount, category, description, date, payment_method, notes)
+        VALUES (4, ?, ?, ?, ?, ?, ?, ?)
     ''', sample_items)
 
 
@@ -241,8 +319,8 @@ def seed_sample_bills(cursor):
     ]
 
     cursor.executemany('''
-        INSERT INTO bills (name, amount, due_day, due_date, category, status, auto_pay, paid_date, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO bills (user_id, name, amount, due_day, due_date, category, status, auto_pay, paid_date, notes)
+        VALUES (4, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', sample_bills)
 
 
@@ -381,6 +459,7 @@ def get_current_user():
 
 @app.route('/api/transactions', methods=['GET'])
 def get_transactions():
+    user_id = get_request_user_id()
     trans_type = request.args.get('type')
     category = request.args.get('category')
     search = request.args.get('search', '').strip()
@@ -392,7 +471,7 @@ def get_transactions():
     mdb = get_mongo_db()
     if mdb is not None:
         try:
-            filter_q = {}
+            filter_q = {'user_id': user_id}
             if trans_type and trans_type.lower() in ['credit', 'debit']:
                 filter_q['type'] = trans_type.lower()
             if category and category.lower() != 'all':
@@ -405,11 +484,14 @@ def get_transactions():
                     filter_q['date']['$lte'] = end_date
             if search:
                 regex = {'$regex': search, '$options': 'i'}
-                filter_q['$or'] = [
-                    {'description': regex},
-                    {'category': regex},
-                    {'payment_method': regex},
-                    {'notes': regex}
+                filter_q['$and'] = [
+                    {'user_id': user_id},
+                    {'$or': [
+                        {'description': regex},
+                        {'category': regex},
+                        {'payment_method': regex},
+                        {'notes': regex}
+                    ]}
                 ]
             
             if sort == 'date_asc':
@@ -427,8 +509,8 @@ def get_transactions():
             print(f"[MongoDB] Query fallback: {e}")
 
     # Local SQLite fallback
-    query = 'SELECT * FROM transactions WHERE 1=1'
-    params = []
+    query = 'SELECT * FROM transactions WHERE user_id = ?'
+    params = [user_id]
 
     if trans_type and trans_type.lower() in ['credit', 'debit']:
         query += ' AND type = ?'
@@ -472,10 +554,11 @@ def get_transactions():
 
 @app.route('/api/transactions/<int:tx_id>', methods=['GET'])
 def get_transaction(tx_id):
+    user_id = get_request_user_id()
     mdb = get_mongo_db()
     if mdb is not None:
         try:
-            doc = mdb.transactions.find_one({'id': tx_id}, {'_id': 0})
+            doc = mdb.transactions.find_one({'id': tx_id, 'user_id': user_id}, {'_id': 0})
             if doc:
                 return jsonify(doc)
         except Exception:
@@ -483,7 +566,7 @@ def get_transaction(tx_id):
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM transactions WHERE id = ?', (tx_id,))
+    cursor.execute('SELECT * FROM transactions WHERE id = ? AND user_id = ?', (tx_id, user_id))
     row = cursor.fetchone()
     conn.close()
 
@@ -494,6 +577,7 @@ def get_transaction(tx_id):
 
 @app.route('/api/transactions', methods=['POST'])
 def create_transaction():
+    user_id = get_request_user_id()
     data = request.get_json()
     if not data:
         return jsonify({'error': 'Request body must be valid JSON'}), 400
@@ -535,9 +619,9 @@ def create_transaction():
     now_time = datetime.now().strftime('%H:%M:%S')
     created_at_val = f"{date_val} {now_time}"
     cursor.execute('''
-        INSERT INTO transactions (type, amount, category, description, date, payment_method, notes, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (tx_type, amount, category, description, date_val, payment_method, notes, created_at_val))
+        INSERT INTO transactions (user_id, type, amount, category, description, date, payment_method, notes, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (user_id, tx_type, amount, category, description, date_val, payment_method, notes, created_at_val))
     conn.commit()
     new_id = cursor.lastrowid
 
@@ -558,13 +642,14 @@ def create_transaction():
 
 @app.route('/api/transactions/<int:tx_id>', methods=['PUT'])
 def update_transaction(tx_id):
+    user_id = get_request_user_id()
     data = request.get_json()
     if not data:
         return jsonify({'error': 'Request body must be valid JSON'}), 400
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM transactions WHERE id = ?', (tx_id,))
+    cursor.execute('SELECT * FROM transactions WHERE id = ? AND user_id = ?', (tx_id, user_id))
     existing = cursor.fetchone()
     if existing is None:
         conn.close()
@@ -605,8 +690,8 @@ def update_transaction(tx_id):
     cursor.execute('''
         UPDATE transactions
         SET type = ?, amount = ?, category = ?, description = ?, date = ?, payment_method = ?, notes = ?
-        WHERE id = ?
-    ''', (tx_type, amount, category, description, date_val, payment_method, notes, tx_id))
+        WHERE id = ? AND user_id = ?
+    ''', (tx_type, amount, category, description, date_val, payment_method, notes, tx_id, user_id))
     conn.commit()
 
     cursor.execute('SELECT * FROM transactions WHERE id = ?', (tx_id,))
@@ -617,7 +702,7 @@ def update_transaction(tx_id):
     mdb = get_mongo_db()
     if mdb is not None:
         try:
-            mdb.transactions.update_one({'id': tx_id}, {'$set': {
+            mdb.transactions.update_one({'id': tx_id, 'user_id': user_id}, {'$set': {
                 'type': tx_type, 'amount': amount, 'category': category,
                 'description': description, 'date': date_val,
                 'payment_method': payment_method, 'notes': notes
@@ -630,14 +715,15 @@ def update_transaction(tx_id):
 
 @app.route('/api/transactions/<int:tx_id>', methods=['DELETE'])
 def delete_transaction(tx_id):
+    user_id = get_request_user_id()
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT id FROM transactions WHERE id = ?', (tx_id,))
+    cursor.execute('SELECT id FROM transactions WHERE id = ? AND user_id = ?', (tx_id, user_id))
     if cursor.fetchone() is None:
         conn.close()
         return jsonify({'error': 'Transaction not found'}), 404
 
-    cursor.execute('DELETE FROM transactions WHERE id = ?', (tx_id,))
+    cursor.execute('DELETE FROM transactions WHERE id = ? AND user_id = ?', (tx_id, user_id))
     conn.commit()
     conn.close()
 
@@ -645,7 +731,7 @@ def delete_transaction(tx_id):
     mdb = get_mongo_db()
     if mdb is not None:
         try:
-            mdb.transactions.delete_one({'id': tx_id})
+            mdb.transactions.delete_one({'id': tx_id, 'user_id': user_id})
         except Exception as e:
             print(f"[MongoDB] delete transaction error: {e}")
 
@@ -656,6 +742,7 @@ def delete_transaction(tx_id):
 
 @app.route('/api/summary', methods=['GET'])
 def get_summary():
+    user_id = get_request_user_id()
     today = datetime.now()
     cur_month_prefix = f"{today.year:04d}-{today.month:02d}"
 
@@ -668,7 +755,8 @@ def get_summary():
             COALESCE(SUM(CASE WHEN type = 'debit' THEN amount ELSE 0 END), 0) AS total_debit,
             COUNT(*) AS total_count
         FROM transactions
-    ''')
+        WHERE user_id = ?
+    ''', (user_id,))
     overall = cursor.fetchone()
     all_time_balance = float(overall['total_credit']) - float(overall['total_debit'])
 
@@ -679,8 +767,8 @@ def get_summary():
             COUNT(CASE WHEN type = 'credit' THEN 1 END) AS month_credit_count,
             COUNT(CASE WHEN type = 'debit' THEN 1 END) AS month_debit_count
         FROM transactions
-        WHERE date LIKE ?
-    ''', (f"{cur_month_prefix}%",))
+        WHERE user_id = ? AND date LIKE ?
+    ''', (user_id, f"{cur_month_prefix}%"))
     cur_month = cursor.fetchone()
 
     month_credit = float(cur_month['month_credit'])
@@ -689,10 +777,10 @@ def get_summary():
     cursor.execute('''
         SELECT category, SUM(amount) as total, COUNT(*) as count
         FROM transactions
-        WHERE type = 'debit' AND date LIKE ?
+        WHERE user_id = ? AND type = 'debit' AND date LIKE ?
         GROUP BY category
         ORDER BY total DESC
-    ''', (f"{cur_month_prefix}%",))
+    ''', (user_id, f"{cur_month_prefix}%"))
     debit_rows = cursor.fetchall()
 
     category_breakdown = []
@@ -709,10 +797,10 @@ def get_summary():
     cursor.execute('''
         SELECT category, SUM(amount) as total, COUNT(*) as count
         FROM transactions
-        WHERE type = 'credit' AND date LIKE ?
+        WHERE user_id = ? AND type = 'credit' AND date LIKE ?
         GROUP BY category
         ORDER BY total DESC
-    ''', (f"{cur_month_prefix}%",))
+    ''', (user_id, f"{cur_month_prefix}%"))
     credit_rows = cursor.fetchall()
 
     income_breakdown = []
@@ -732,9 +820,10 @@ def get_summary():
             COALESCE(SUM(CASE WHEN type = 'credit' THEN amount ELSE 0 END), 0) AS credit,
             COALESCE(SUM(CASE WHEN type = 'debit' THEN amount ELSE 0 END), 0) AS debit
         FROM transactions
+        WHERE user_id = ?
         GROUP BY SUBSTR(date, 1, 7)
         ORDER BY month ASC
-    ''')
+    ''', (user_id,))
     trend_rows = cursor.fetchall()
     monthly_trend = [
         {
@@ -749,9 +838,10 @@ def get_summary():
     cursor.execute('''
         SELECT payment_method, COUNT(*) as count, SUM(amount) as total
         FROM transactions
+        WHERE user_id = ?
         GROUP BY payment_method
         ORDER BY total DESC
-    ''')
+    ''', (user_id,))
     pm_rows = cursor.fetchall()
     payment_methods = [{'method': r['payment_method'], 'count': r['count'], 'total': float(r['total'])} for r in pm_rows]
 
@@ -761,8 +851,8 @@ def get_summary():
         SELECT 
             COALESCE(SUM(CASE WHEN type = 'credit' THEN amount ELSE -amount END), 0) AS prior_balance
         FROM transactions
-        WHERE date < ?
-    ''', (cur_month_start,))
+        WHERE user_id = ? AND date < ?
+    ''', (user_id, cur_month_start))
     prior_balance = float(cursor.fetchone()['prior_balance'])
 
     cursor.execute('''
@@ -770,10 +860,10 @@ def get_summary():
             date,
             SUM(CASE WHEN type = 'credit' THEN amount ELSE -amount END) AS net_change
         FROM transactions
-        WHERE date LIKE ?
+        WHERE user_id = ? AND date LIKE ?
         GROUP BY date
         ORDER BY date ASC
-    ''', (f"{cur_month_prefix}%",))
+    ''', (user_id, f"{cur_month_prefix}%"))
     daily_changes = {r['date']: float(r['net_change']) for r in cursor.fetchall()}
 
     running_bal = prior_balance
@@ -801,8 +891,8 @@ def get_summary():
         SELECT 
             COALESCE(SUM(CASE WHEN type = 'credit' THEN amount ELSE -amount END), 0) AS prev_prior_bal
         FROM transactions
-        WHERE date < ?
-    ''', (prev_month_start,))
+        WHERE user_id = ? AND date < ?
+    ''', (user_id, prev_month_start))
     prev_running = float(cursor.fetchone()['prev_prior_bal'])
 
     cursor.execute('''
@@ -810,10 +900,10 @@ def get_summary():
             date,
             SUM(CASE WHEN type = 'credit' THEN amount ELSE -amount END) AS net_change
         FROM transactions
-        WHERE date LIKE ?
+        WHERE user_id = ? AND date LIKE ?
         GROUP BY date
         ORDER BY date ASC
-    ''', (f"{prev_month_prefix}%",))
+    ''', (user_id, f"{prev_month_prefix}%"))
     prev_daily_changes = {r['date']: float(r['net_change']) for r in cursor.fetchall()}
 
     prev_balance_trend = []
@@ -878,13 +968,14 @@ def get_summary():
 
 @app.route('/api/bills', methods=['GET'])
 def get_bills():
+    user_id = get_request_user_id()
     status = request.args.get('status')
     
     # Try MongoDB Atlas first
     mdb = get_mongo_db()
     if mdb is not None:
         try:
-            filter_q = {}
+            filter_q = {'user_id': user_id}
             if status and status != 'all':
                 filter_q['status'] = status
             bills = list(mdb.bills.find(filter_q, {'_id': 0}).sort('due_day', 1))
@@ -895,8 +986,8 @@ def get_bills():
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    query = 'SELECT * FROM bills WHERE 1=1'
-    params = []
+    query = 'SELECT * FROM bills WHERE user_id = ?'
+    params = [user_id]
     if status and status != 'all':
         query += ' AND status = ?'
         params.append(status)
@@ -911,6 +1002,7 @@ def get_bills():
 
 @app.route('/api/bills', methods=['POST'])
 def create_bill():
+    user_id = get_request_user_id()
     data = request.get_json() or {}
     name = data.get('name', '').strip()
     amount = data.get('amount')
@@ -942,9 +1034,9 @@ def create_bill():
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT INTO bills (name, amount, due_day, due_date, category, status, auto_pay, notes)
-        VALUES (?, ?, ?, ?, ?, 'unpaid', ?, ?)
-    ''', (name, amount, due_day, due_date, category, auto_pay, notes))
+        INSERT INTO bills (user_id, name, amount, due_day, due_date, category, status, auto_pay, notes)
+        VALUES (?, ?, ?, ?, ?, ?, 'unpaid', ?, ?)
+    ''', (user_id, name, amount, due_day, due_date, category, auto_pay, notes))
     conn.commit()
     new_id = cursor.lastrowid
     cursor.execute('SELECT * FROM bills WHERE id = ?', (new_id,))
@@ -964,10 +1056,11 @@ def create_bill():
 
 @app.route('/api/bills/<int:bill_id>', methods=['PUT'])
 def update_bill(bill_id):
+    user_id = get_request_user_id()
     data = request.get_json() or {}
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM bills WHERE id = ?', (bill_id,))
+    cursor.execute('SELECT * FROM bills WHERE id = ? AND user_id = ?', (bill_id, user_id))
     existing = cursor.fetchone()
     if not existing:
         conn.close()
@@ -994,8 +1087,8 @@ def update_bill(bill_id):
     cursor.execute('''
         UPDATE bills
         SET name = ?, amount = ?, due_day = ?, due_date = ?, category = ?, status = ?, auto_pay = ?, paid_date = ?, notes = ?
-        WHERE id = ?
-    ''', (name, amount, due_day, due_date, category, status, auto_pay, paid_date, notes, bill_id))
+        WHERE id = ? AND user_id = ?
+    ''', (name, amount, due_day, due_date, category, status, auto_pay, paid_date, notes, bill_id, user_id))
     conn.commit()
     cursor.execute('SELECT * FROM bills WHERE id = ?', (bill_id,))
     updated = dict(cursor.fetchone())
@@ -1005,7 +1098,7 @@ def update_bill(bill_id):
     mdb = get_mongo_db()
     if mdb is not None:
         try:
-            mdb.bills.update_one({'id': bill_id}, {'$set': {
+            mdb.bills.update_one({'id': bill_id, 'user_id': user_id}, {'$set': {
                 'name': name, 'amount': amount, 'due_day': due_day,
                 'due_date': due_date, 'category': category, 'status': status,
                 'auto_pay': auto_pay, 'paid_date': paid_date, 'notes': notes
@@ -1018,14 +1111,15 @@ def update_bill(bill_id):
 
 @app.route('/api/bills/<int:bill_id>', methods=['DELETE'])
 def delete_bill(bill_id):
+    user_id = get_request_user_id()
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT id FROM bills WHERE id = ?', (bill_id,))
+    cursor.execute('SELECT id FROM bills WHERE id = ? AND user_id = ?', (bill_id, user_id))
     if not cursor.fetchone():
         conn.close()
         return jsonify({'error': 'Bill not found'}), 404
 
-    cursor.execute('DELETE FROM bills WHERE id = ?', (bill_id,))
+    cursor.execute('DELETE FROM bills WHERE id = ? AND user_id = ?', (bill_id, user_id))
     conn.commit()
     conn.close()
 
@@ -1033,7 +1127,7 @@ def delete_bill(bill_id):
     mdb = get_mongo_db()
     if mdb is not None:
         try:
-            mdb.bills.delete_one({'id': bill_id})
+            mdb.bills.delete_one({'id': bill_id, 'user_id': user_id})
         except Exception as e:
             print(f"[MongoDB] delete bill error: {e}")
 
@@ -1042,12 +1136,13 @@ def delete_bill(bill_id):
 
 @app.route('/api/bills/<int:bill_id>/pay', methods=['POST'])
 def pay_bill(bill_id):
+    user_id = get_request_user_id()
     data = request.get_json() or {}
     record_expense = data.get('record_expense', True)
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM bills WHERE id = ?', (bill_id,))
+    cursor.execute('SELECT * FROM bills WHERE id = ? AND user_id = ?', (bill_id, user_id))
     bill = cursor.fetchone()
     if not bill:
         conn.close()
@@ -1060,15 +1155,16 @@ def pay_bill(bill_id):
     cursor.execute('''
         UPDATE bills
         SET status = 'paid', paid_date = ?
-        WHERE id = ?
-    ''', (today_str, bill_id))
+        WHERE id = ? AND user_id = ?
+    ''', (today_str, bill_id, user_id))
 
     new_tx_id = None
     if record_expense:
         cursor.execute('''
-            INSERT INTO transactions (type, amount, category, description, date, payment_method, notes, created_at)
-            VALUES ('debit', ?, ?, ?, ?, 'Bank Transfer', ?, ?)
+            INSERT INTO transactions (user_id, type, amount, category, description, date, payment_method, notes, created_at)
+            VALUES (?, 'debit', ?, ?, ?, ?, 'Bank Transfer', ?, ?)
         ''', (
+            user_id,
             bill_dict['amount'],
             bill_dict['category'],
             f"Bill Payment: {bill_dict['name']}",
@@ -1087,10 +1183,11 @@ def pay_bill(bill_id):
     mdb = get_mongo_db()
     if mdb is not None:
         try:
-            mdb.bills.update_one({'id': bill_id}, {'$set': {'status': 'paid', 'paid_date': today_str}})
+            mdb.bills.update_one({'id': bill_id, 'user_id': user_id}, {'$set': {'status': 'paid', 'paid_date': today_str}})
             if record_expense and new_tx_id:
                 tx_doc = {
                     'id': new_tx_id,
+                    'user_id': user_id,
                     'type': 'debit',
                     'amount': bill_dict['amount'],
                     'category': bill_dict['category'],
@@ -1112,6 +1209,7 @@ def pay_bill(bill_id):
 
 @app.route('/api/bills/summary', methods=['GET'])
 def get_bills_summary():
+    user_id = get_request_user_id()
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -1124,7 +1222,8 @@ def get_bills_summary():
             COUNT(CASE WHEN status = 'paid' THEN 1 END) AS paid_count,
             COUNT(CASE WHEN status != 'paid' THEN 1 END) AS pending_count
         FROM bills
-    ''')
+        WHERE user_id = ?
+    ''', (user_id,))
     summary_row = cursor.fetchone()
 
     today = datetime.now()
@@ -1132,17 +1231,17 @@ def get_bills_summary():
 
     cursor.execute('''
         SELECT * FROM bills
-        WHERE status != 'paid' AND due_day >= ?
+        WHERE user_id = ? AND status != 'paid' AND due_day >= ?
         ORDER BY due_day ASC LIMIT 1
-    ''', (cur_day,))
+    ''', (user_id, cur_day))
     next_bill_row = cursor.fetchone()
 
     if not next_bill_row:
         cursor.execute('''
             SELECT * FROM bills
-            WHERE status != 'paid'
+            WHERE user_id = ? AND status != 'paid'
             ORDER BY due_day ASC LIMIT 1
-        ''')
+        ''', (user_id,))
         next_bill_row = cursor.fetchone()
 
     next_bill = dict(next_bill_row) if next_bill_row else None
@@ -1168,6 +1267,7 @@ def get_bills_summary():
 
 @app.route('/api/report/preview', methods=['GET'])
 def get_report_preview():
+    user_id = get_request_user_id()
     today = datetime.now()
     month = request.args.get('month', f"{today.year:04d}-{today.month:02d}")
 
@@ -1175,11 +1275,11 @@ def get_report_preview():
     cursor = conn.cursor()
 
     # Available months
-    cursor.execute('SELECT DISTINCT SUBSTR(date, 1, 7) as m FROM transactions ORDER BY m DESC')
+    cursor.execute('SELECT DISTINCT SUBSTR(date, 1, 7) as m FROM transactions WHERE user_id = ? ORDER BY m DESC', (user_id,))
     available_months = [r['m'] for r in cursor.fetchall() if r['m']]
 
-    filter_clause = " WHERE 1=1"
-    params = []
+    filter_clause = " WHERE user_id = ?"
+    params = [user_id]
     if month and month != 'all':
         filter_clause += " AND date LIKE ?"
         params.append(f"{month}%")
@@ -1237,14 +1337,15 @@ def get_report_preview():
 
 @app.route('/api/report/excel', methods=['GET'])
 def export_monthly_excel():
+    user_id = get_request_user_id()
     today = datetime.now()
     month = request.args.get('month', f"{today.year:04d}-{today.month:02d}")
 
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    filter_clause = " WHERE 1=1"
-    params = []
+    filter_clause = " WHERE user_id = ?"
+    params = [user_id]
     if month and month != 'all':
         filter_clause += " AND date LIKE ?"
         params.append(f"{month}%")
@@ -1269,7 +1370,7 @@ def export_monthly_excel():
     cat_rows = cursor.fetchall()
 
     # Fetch Bills
-    cursor.execute('SELECT id, name, due_date, category, amount, status, auto_pay FROM bills ORDER BY due_day ASC')
+    cursor.execute('SELECT id, name, due_date, category, amount, status, auto_pay FROM bills WHERE user_id = ? ORDER BY due_day ASC', (user_id,))
     bills = cursor.fetchall()
 
     conn.close()
@@ -1481,9 +1582,10 @@ def get_categories():
 
 @app.route('/api/export', methods=['GET'])
 def export_csv():
+    user_id = get_request_user_id()
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT id, date, type, category, description, amount, payment_method, notes, created_at FROM transactions ORDER BY date DESC, id DESC')
+    cursor.execute('SELECT id, date, type, category, description, amount, payment_method, notes, created_at FROM transactions WHERE user_id = ? ORDER BY date DESC, id DESC', (user_id,))
     rows = cursor.fetchall()
     conn.close()
 
@@ -1555,23 +1657,24 @@ def mongodb_status():
 
 @app.route('/api/reset', methods=['POST'])
 def reset_seed():
-    """Clear all transactions and bills, removing all demo data cleanly."""
+    """Clear all transactions and bills for the current user."""
+    user_id = get_request_user_id()
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('DELETE FROM transactions')
-    cursor.execute('DELETE FROM bills')
+    cursor.execute('DELETE FROM transactions WHERE user_id = ?', (user_id,))
+    cursor.execute('DELETE FROM bills WHERE user_id = ?', (user_id,))
     conn.commit()
     conn.close()
 
     mdb = get_mongo_db()
     if mdb is not None:
         try:
-            mdb.transactions.delete_many({})
-            mdb.bills.delete_many({})
+            mdb.transactions.delete_many({'user_id': user_id})
+            mdb.bills.delete_many({'user_id': user_id})
         except Exception as e:
             print(f"[!] MongoDB Atlas reset notice: {e}")
 
-    return jsonify({"status": "cleared", "message": "All demo records removed. Database is now clean and empty in MongoDB Atlas & SQLite!"})
+    return jsonify({"status": "cleared", "message": f"All records for user {user_id} removed. Database is now clean and empty for this user!"})
 
 
 # Serve built React frontend if available

@@ -814,6 +814,50 @@ def get_summary():
             'percentage': round(pct, 1)
         })
 
+    # All-time breakdowns for overall perspective and seamless fallback
+    total_credit_val = float(overall['total_credit'])
+    total_debit_val = float(overall['total_debit'])
+
+    cursor.execute('''
+        SELECT category, SUM(amount) as total, COUNT(*) as count
+        FROM transactions
+        WHERE user_id = ? AND type = 'debit'
+        GROUP BY category
+        ORDER BY total DESC
+    ''', (user_id,))
+    all_time_debit_rows = cursor.fetchall()
+
+    all_time_category_breakdown = []
+    for r in all_time_debit_rows:
+        cat_amount = float(r['total'])
+        pct = (cat_amount / total_debit_val * 100) if total_debit_val > 0 else 0
+        all_time_category_breakdown.append({
+            'category': r['category'],
+            'total': cat_amount,
+            'count': r['count'],
+            'percentage': round(pct, 1)
+        })
+
+    cursor.execute('''
+        SELECT category, SUM(amount) as total, COUNT(*) as count
+        FROM transactions
+        WHERE user_id = ? AND type = 'credit'
+        GROUP BY category
+        ORDER BY total DESC
+    ''', (user_id,))
+    all_time_credit_rows = cursor.fetchall()
+
+    all_time_income_breakdown = []
+    for r in all_time_credit_rows:
+        cat_amount = float(r['total'])
+        pct = (cat_amount / total_credit_val * 100) if total_credit_val > 0 else 0
+        all_time_income_breakdown.append({
+            'category': r['category'],
+            'total': cat_amount,
+            'count': r['count'],
+            'percentage': round(pct, 1)
+        })
+
     cursor.execute('''
         SELECT 
             SUBSTR(date, 1, 7) AS month,
@@ -956,6 +1000,8 @@ def get_summary():
         'total_count': overall['total_count'],
         'category_breakdown': category_breakdown,
         'income_breakdown': income_breakdown,
+        'all_time_category_breakdown': all_time_category_breakdown,
+        'all_time_income_breakdown': all_time_income_breakdown,
         'monthly_trend': monthly_trend,
         'payment_methods': payment_methods,
         'daily_balance_trend': daily_balance_trend,
